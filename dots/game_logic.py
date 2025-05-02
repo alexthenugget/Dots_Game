@@ -53,25 +53,40 @@ class GameLogic:
 
     def place_dot(self, grid_x: int, grid_y: int) -> bool:
         """Помещает точку игрока на поле."""
-        if not self.is_valid_move(grid_x, grid_y):
+        if not self._validate_move(grid_x, grid_y):
             return False
 
-        if self._grid[grid_y][grid_x] != self.EMPTY_CELL:
-            return False
-
-        self._grid[grid_y][grid_x] = self.current_player
-        self._filled_cells += 1
+        self._execute_move(grid_x, grid_y)
 
         if self._is_board_full():
             return True
 
         self._check_neighbors(grid_x, grid_y)
+        self._handle_captures(grid_x, grid_y)
+        self._check_self_capture(grid_x, grid_y)
 
+        return self._is_board_full()
+
+    def _validate_move(self, grid_x: int, grid_y: int) -> bool:
+        """Validate if move is possible."""
+        if not (0 <= grid_x <= self._grid_width and 0 <= grid_y <= self._grid_height):
+            return False
+        return self._grid[grid_y][grid_x] == self.EMPTY_CELL
+
+    def _execute_move(self, grid_x: int, grid_y: int) -> None:
+        """Execute the move on the grid."""
+        self._grid[grid_y][grid_x] = self.current_player
+        self._filled_cells += 1
+
+    def _handle_captures(self, grid_x: int, grid_y: int) -> None:
+        """Handle opponent captures after move."""
         captures = self._check_captures(grid_x, grid_y)
         if captures > self.INITIAL_FILLED_CELLS:
             self.scores[self.current_player] += captures
             self._game_ui.update_scoreboard()
 
+    def _check_self_capture(self, grid_x: int, grid_y: int) -> None:
+        """Check if move causes self-capture."""
         opponent = self.PLAYER_2 if self.current_player == self.PLAYER_1 else self.PLAYER_1
         for dx, dy in self.FOUR_DIRECTIONS:
             nx, ny = grid_x + dx, grid_y + dy
@@ -79,16 +94,10 @@ class GameLogic:
                 if self._grid[ny][nx] == self.current_player:
                     group, is_surrounded = self._get_group_with_status(nx, ny, self.current_player)
                     if is_surrounded:
-                        self_captures = 0
-                        for gx, gy in group:
-                            if self._grid[gy][gx] == self.current_player:
-                                self_captures += 1
-
+                        self_captures = sum(1 for gx, gy in group if self._grid[gy][gx] == self.current_player)
                         if self_captures > 0:
                             self.scores[opponent] += self_captures
                             self._game_ui.update_scoreboard()
-
-        return self._is_board_full()
 
     def _check_neighbors(self, grid_x: int, grid_y: int) -> None:
         """
@@ -181,59 +190,89 @@ class GameLogic:
         return None
 
     def make_ai_move_smart(self) -> tuple[int, int] | None:
-        """
-        Умный ИИ: сначала пытается окружить точки игрока, затем делает ход рядом
-        с ними.
-        """
+        """Smart AI move: tries to capture player dots first, then plays strategically."""
+        capture_move = self._find_capture_move()
+        if capture_move:
+            return self._execute_ai_move(capture_move[0], capture_move[1])
+
+        strategic_move = self._find_strategic_move()
+        if strategic_move:
+            return self._execute_ai_move(strategic_move[0], strategic_move[1])
+
+        return self.make_ai_move_random()
+
+    def _find_capture_move(self) -> tuple[int, int] | None:
+        """Find a move that would capture player dots."""
         for y in range(self._grid_height + 1):
             for x in range(self._grid_width + 1):
-                if self.is_valid_move(x, y):
-                    if self._would_capture_player(x, y):
-                        if self.place_dot(x, y):
-                            return None
-                        return x, y
-        player_dots = []
+                if self.is_valid_move(x, y) and self._would_capture_player(x, y):
+                    return x, y
+        return None
+
+    def _find_strategic_move(self) -> tuple[int, int] | None:
+        """Find a strategic move near player dots."""
+        player_dots = self._get_player_dots()
+        if not player_dots:
+            return None
+
+        candidate_moves = self._get_candidate_moves(player_dots)
+        if not candidate_moves:
+            return None
+
+        return self._select_best_move(candidate_moves)
+
+    def _get_player_dots(self) -> list[tuple[int, int]]:
+        """Get all player dots on the board."""
+        dots = []
         for y in range(self._grid_height + 1):
             for x in range(self._grid_width + 1):
                 if self._grid[y][x] == self.PLAYER_1:
-                    player_dots.append((x, y))
+                    dots.append((x, y))
+        return dots
 
-        if not player_dots:
-            return self.make_ai_move_random()
-
-        candidate_moves = []
+    def _get_candidate_moves(self, player_dots: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        """Get all valid moves near player dots."""
+        candidates = []
         for x, y in player_dots:
             for dx, dy in self.EIGHT_DIRECTIONS:
                 nx, ny = x + dx, y + dy
                 if 0 <= nx <= self._grid_width and 0 <= ny <= self._grid_height:
                     if self.is_valid_move(nx, ny):
-                        candidate_moves.append((nx, ny))
+                        candidates.append((nx, ny))
+        return candidates
 
-        if not candidate_moves:
-            return self.make_ai_move_random()
-        best_move = None
+    def _select_best_move(self, candidates: list[tuple[int, int]]) -> tuple[int, int]:
+        """Select best move from candidates based on scoring. If no candidates, return a random move."""
+        if not candidates:
+            return self.make_ai_move_random() or (0, 0)
+
+        best_move = candidates[0]
         best_score = -1
 
-        for x, y in candidate_moves:
-            score = 0
-            for dx, dy in self.EIGHT_DIRECTIONS:
-                nx, ny = x + dx, y + dy
-                if 0 <= nx <= self._grid_width and 0 <= ny <= self._grid_height:
-                    if self._grid[ny][nx] == self.PLAYER_1:
-                        score += 3
-                    elif self._grid[ny][nx] == self.PLAYER_2:
-                        score += 1
-
+        for x, y in candidates:
+            score = self._calculate_move_score(x, y)
             if score > best_score or (score == best_score and random.random() < 0.5):
                 best_score = score
                 best_move = (x, y)
+        return best_move
 
-        if best_move:
-            if self.place_dot(best_move[0], best_move[1]):
-                return None
-            return best_move
+    def _calculate_move_score(self, x: int, y: int) -> int:
+        """Calculate score for a potential move."""
+        score = 0
+        for dx, dy in self.EIGHT_DIRECTIONS:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx <= self._grid_width and 0 <= ny <= self._grid_height:
+                if self._grid[ny][nx] == self.PLAYER_1:
+                    score += 3
+                elif self._grid[ny][nx] == self.PLAYER_2:
+                    score += 1
+        return score
 
-        return self.make_ai_move_random()
+    def _execute_ai_move(self, x: int, y: int) -> tuple[int, int] | None:
+        """Execute the AI move and return coordinates or None if game ends."""
+        if self.place_dot(x, y):
+            return None
+        return x, y
 
     def _would_capture_player(self, x: int, y: int) -> bool:
         """Проверяет, приведет ли ход к захвату области игрока."""
